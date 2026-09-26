@@ -2,6 +2,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import Optional
 
+# Import the core engine logic
+from engine import validate_and_normalize_ioc, calculate_confidence_score
+
 app = FastAPI(
     title="ThreatMapper v2 API",
     description="Multi-tiered OSINT aggregation and monitoring engine",
@@ -24,13 +27,30 @@ class SiemConfig(BaseModel):
 
 @app.post("/api/lookup")
 async def lookup_ioc(request: LookupRequest):
-    # Denzel will send {"ioc_value": "192.168.1.1", "ioc_type": "ip"}
-    return {
-        "ioc": request.ioc_value,
-        "verdict": "suspicious", 
-        "confidence_score": 45
+    try:
+        # 1. Pre-flight Validation & Normalization
+        clean_ioc = validate_and_normalize_ioc(request.ioc_value, request.ioc_type)
+    except ValueError as e:
+        # Reject malformed inputs immediately with a 400 status code
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # 2. Mock external API results (to be replaced by Async OSINT Connector Layer)
+    mock_source_results = {
+        "virustotal": {"is_flagged": True},
+        "abuseipdb": {"is_flagged": False},
+        "urlhaus": {"is_flagged": True}
     }
-
+    
+    # 3. Apply Canonical Confidence Scoring
+    score, verdict = calculate_confidence_score(mock_source_results)
+    
+    return {
+        "ioc": clean_ioc,
+        "type": request.ioc_type,
+        "verdict": verdict, 
+        "confidence_score": score,
+        "sources_queried": list(mock_source_results.keys())
+    }
 @app.get("/api/watchlist")
 async def get_watchlist():
     return {"status": "success", "data": []}
