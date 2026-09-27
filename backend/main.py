@@ -1,15 +1,28 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import Optional
+import asyncio
+from contextlib import asynccontextmanager
+
+from jobs import start_scheduler
 
 # Import the core engine logic
 from engine import validate_and_normalize_ioc, calculate_confidence_score
 
-app = FastAPI(
-    title="ThreatMapper v2 API",
-    description="Multi-tiered OSINT aggregation and monitoring engine",
-    version="2.0.0"
-)
+# Import the new async connector
+from connectors import fetch_virustotal, fetch_abuseipdb
+
+# 1. Define the lifespan function FIRST
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # This runs when the server starts
+    start_scheduler()
+    yield
+    # This runs when the server shuts down
+    print("Shutting down background jobs...")
+
+# 2. Pass it directly into the FastAPI initialization
+app = FastAPI(title="ThreatMapper v2 API", lifespan=lifespan)
 
 # --- Pydantic Data Models ---
 
@@ -28,29 +41,32 @@ class SiemConfig(BaseModel):
 @app.post("/api/lookup")
 async def lookup_ioc(request: LookupRequest):
     try:
-        # 1. Pre-flight Validation & Normalization
         clean_ioc = validate_and_normalize_ioc(request.ioc_value, request.ioc_type)
     except ValueError as e:
-        # Reject malformed inputs immediately with a 400 status code
         raise HTTPException(status_code=400, detail=str(e))
     
-    # 2. Mock external API results (to be replaced by Async OSINT Connector Layer)
-    mock_source_results = {
-        "virustotal": {"is_flagged": True},
-        "abuseipdb": {"is_flagged": False},
-        "urlhaus": {"is_flagged": True}
+    # Fire both API requests concurrently in the background
+    vt_task = fetch_virustotal(clean_ioc, request.ioc_type)
+    abuseipdb_task = fetch_abuseipdb(clean_ioc, request.ioc_type)
+    
+    # Wait for both tasks to finish simultaneously
+    vt_result, abuse_result = await asyncio.gather(vt_task, abuseipdb_task)
+    
+    live_source_results = {
+        "virustotal": vt_result,
+        "abuseipdb": abuse_result
     }
     
-    # 3. Apply Canonical Confidence Scoring
-    score, verdict = calculate_confidence_score(mock_source_results)
+    score, verdict = calculate_confidence_score(live_source_results)
     
     return {
         "ioc": clean_ioc,
         "type": request.ioc_type,
         "verdict": verdict, 
         "confidence_score": score,
-        "sources_queried": list(mock_source_results.keys())
+        "sources_queried": list(live_source_results.keys())
     }
+
 @app.get("/api/watchlist")
 async def get_watchlist():
     return {"status": "success", "data": []}
