@@ -1,12 +1,28 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import Optional
+import asyncio
+from contextlib import asynccontextmanager
 
-app = FastAPI(
-    title="ThreatMapper v2 API",
-    description="Multi-tiered OSINT aggregation and monitoring engine",
-    version="2.0.0"
-)
+from jobs import start_scheduler
+
+# Import the core engine logic
+from engine import validate_and_normalize_ioc, calculate_confidence_score
+
+# Import the new async connector
+from connectors import fetch_virustotal, fetch_abuseipdb
+
+# 1. Define the lifespan function FIRST
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # This runs when the server starts
+    start_scheduler()
+    yield
+    # This runs when the server shuts down
+    print("Shutting down background jobs...")
+
+# 2. Pass it directly into the FastAPI initialization
+app = FastAPI(title="ThreatMapper v2 API", lifespan=lifespan)
 
 # --- Pydantic Data Models ---
 
@@ -24,11 +40,31 @@ class SiemConfig(BaseModel):
 
 @app.post("/api/lookup")
 async def lookup_ioc(request: LookupRequest):
-    # Denzel will send {"ioc_value": "192.168.1.1", "ioc_type": "ip"}
+    try:
+        clean_ioc = validate_and_normalize_ioc(request.ioc_value, request.ioc_type)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # Fire both API requests concurrently in the background
+    vt_task = fetch_virustotal(clean_ioc, request.ioc_type)
+    abuseipdb_task = fetch_abuseipdb(clean_ioc, request.ioc_type)
+    
+    # Wait for both tasks to finish simultaneously
+    vt_result, abuse_result = await asyncio.gather(vt_task, abuseipdb_task)
+    
+    live_source_results = {
+        "virustotal": vt_result,
+        "abuseipdb": abuse_result
+    }
+    
+    score, verdict = calculate_confidence_score(live_source_results)
+    
     return {
-        "ioc": request.ioc_value,
-        "verdict": "suspicious", 
-        "confidence_score": 45
+        "ioc": clean_ioc,
+        "type": request.ioc_type,
+        "verdict": verdict, 
+        "confidence_score": score,
+        "sources_queried": list(live_source_results.keys())
     }
 
 @app.get("/api/watchlist")
