@@ -1,69 +1,53 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Enum, Float, JSON
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Boolean
+from sqlalchemy.orm import relationship
 from datetime import datetime
-import enum
+from database import Base
 
-Base = declarative_base()
-
-class SiemType(enum.Enum):
-    splunk = "splunk"
-    wazuh = "wazuh"
-
-class SyncMode(enum.Enum):
-    push = "push"
-    pull = "pull"
-
-# 1. Primary Authentication & Organizational Tables
 class Organization(Base):
     __tablename__ = "organizations"
-    org_id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
 
-class User(Base):
-    __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
-    org_id = Column(Integer, ForeignKey("organizations.org_id"), nullable=False) # Enforces org_id isolation
-    username = Column(String, unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-# 2. Local Cache & Raw Data
-class Ioc(Base):
-    __tablename__ = "iocs"
+    siem_configs = relationship("SiemConfigRecord", back_populates="organization", cascade="all, delete-orphan")
+
+class SiemConfigRecord(Base):
+    __tablename__ = "siem_configs"
+
     id = Column(Integer, primary_key=True, index=True)
-    org_id = Column(Integer, ForeignKey("organizations.org_id"), nullable=False)
-    ioc_value = Column(String, index=True, nullable=False)
-    ioc_type = Column(String, nullable=False) # e.g., IP, domain, hash
-    verdict = Column(String, nullable=False)
+    org_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    siem_type = Column(String(50), nullable=False)
+    endpoint_url = Column(String(255), nullable=True)
+    auth_token = Column(String(255), nullable=False)
+    sync_mode = Column(String(20), default="push")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    organization = relationship("Organization", back_populates="siem_configs")
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "siem_type", name="uq_org_siem_type"),
+    )
+
+class IOCRecord(Base):
+    __tablename__ = "ioc_records"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    ioc_value = Column(String(255), unique=True, index=True, nullable=False)
+    ioc_type = Column(String(50), nullable=False)
+    verdict = Column(String(50), nullable=False)
     confidence_score = Column(Float, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    last_seen = Column(DateTime, default=datetime.utcnow)
 
-class SourceResult(Base):
-    __tablename__ = "source_results"
-    id = Column(Integer, primary_key=True, index=True)
-    org_id = Column(Integer, ForeignKey("organizations.org_id"), nullable=False)
-    ioc_id = Column(Integer, ForeignKey("iocs.id"), nullable=False)
-    raw_payload = Column(JSON, nullable=False) # Stores raw JSON from external APIs
 
-# 3. Continuous Monitoring
-class Watchlist(Base):
-    __tablename__ = "watchlist"
+class WatchlistRecord(Base):
+    __tablename__ = "watchlist_records"
+    
     id = Column(Integer, primary_key=True, index=True)
-    org_id = Column(Integer, ForeignKey("organizations.org_id"), nullable=False)
-    asset_value = Column(String, nullable=False)
-
-class Alert(Base):
-    __tablename__ = "alerts"
-    id = Column(Integer, primary_key=True, index=True)
-    org_id = Column(Integer, ForeignKey("organizations.org_id"), nullable=False)
-    message_body = Column(String, nullable=False)
-    acknowledged = Column(Boolean, default=False) # Tracks user acknowledgment state
-
-# 4. v2 Architecture Addition
-class SiemConfig(Base):
-    __tablename__ = "siem_config"
-    id = Column(Integer, primary_key=True, index=True)
-    org_id = Column(Integer, ForeignKey("organizations.org_id"), nullable=False)
-    siem_type = Column(Enum(SiemType), nullable=False)
-    endpoint_url = Column(String, nullable=True)
-    auth_token = Column(String, nullable=False) # Must be encrypted at rest in production
-    sync_mode = Column(Enum(SyncMode), nullable=False)
-    last_synced_at = Column(DateTime, nullable=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    ioc_value = Column(String, index=True, nullable=False)
+    ioc_type = Column(String, nullable=False)
+    added_at = Column(DateTime, default=datetime.utcnow)
+    last_checked = Column(DateTime, nullable=True)
+    alert_on_change = Column(Boolean, default=True)
