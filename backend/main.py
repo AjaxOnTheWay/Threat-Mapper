@@ -5,7 +5,7 @@ from typing import Optional
 import asyncio
 from datetime import datetime
 from contextlib import asynccontextmanager
-
+from uuid import uuid4
 from database import engine, get_db
 import models
 from jobs import start_scheduler
@@ -197,3 +197,50 @@ async def get_siem_configs(org_id: int, db: Session = Depends(get_db)):
             } for c in configs
         ]
     }
+
+
+#the STIX 2.1 endpoint
+@app.get("/api/export/stix21/{watchlist_id}")
+def export_stix21(watchlist_id: int, db: Session = Depends(get_db)):
+    """
+    Exports a specific watchlisted threat as a STIX 2.1 JSON Bundle.
+    """
+    record = db.query(models.WatchlistRecord).filter(models.WatchlistRecord.id == watchlist_id).first()
+    
+    if not record:
+        raise HTTPException(status_code=404, detail="Watchlist record not found")
+    
+    indicator_id = f"indicator--{uuid4()}"
+    bundle_id = f"bundle--{uuid4()}"
+    now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    
+    # case insensitivity
+    ioc_type_clean = record.ioc_type.lower()
+    
+    pattern_map = {
+        "ip": f"[ipv4-addr:value = '{record.ioc_value}']",
+        "domain": f"[domain-name:value = '{record.ioc_value}']",
+        "hash": f"[file:hashes.SHA-256 = '{record.ioc_value}']",
+        "siem": f"[ipv4-addr:value = '{record.ioc_value}']"  # Handle legacy test rows
+    }
+    pattern = pattern_map.get(ioc_type_clean, f"[custom-type:value = '{record.ioc_value}']")
+
+    stix_bundle = {
+        "type": "bundle",
+        "id": bundle_id,
+        "objects": [
+            {
+                "type": "indicator",
+                "spec_version": "2.1",
+                "id": indicator_id,
+                "created": now_iso,
+                "modified": now_iso,
+                "name": f"ThreatMapper Alert - {record.ioc_value}",
+                "description": f"Automated STIX 2.1 export for organization {record.org_id}",
+                "pattern": pattern,
+                "pattern_type": "stix",
+                "valid_from": now_iso
+            }
+        ]
+    }
+    return stix_bundle
